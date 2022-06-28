@@ -73,7 +73,7 @@ func main() {
 		if results == *count {
 			break
 		}
-		
+
 		select {
 		case result := <-resp:
 			if result.Err != nil {

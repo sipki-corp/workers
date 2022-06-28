@@ -2,18 +2,11 @@ package workers
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/powerman/chanq"
 )
-
-// Result contains job payload.
-type Result[T any] struct {
-	Value T
-	Err   error
-}
 
 type (
 	reqGetJobCount struct {
@@ -29,14 +22,14 @@ type Pool[T any] struct {
 	initWorkerCount   int
 	maxWorkers        int
 	minWorkers        int
-	newJob            chan Job[T]
-	exec              chan Job[T]
+	queue             chan Job[T]
+	jobs              chan Job[T]
 	resize            chan int
 	reqGetJobCount    chan reqGetJobCount
 	reqGetWorkerCount chan reqGetWorkerCount
 	done              chan struct{}
-	startOnce         sync.Once
-	closeOnce         sync.Once
+	startOnce         *sync.Once
+	closeOnce         *sync.Once
 	wg                *sync.WaitGroup
 }
 
@@ -46,8 +39,6 @@ const (
 	minWorkers             = 1
 )
 
-var ErrInvalidArgument = errors.New("invalid argument")
-
 // NewPool build and returns *Pool[T].
 // It doesn't start process work.
 // So before sending tasks, you must call Pool.Start.
@@ -56,14 +47,14 @@ func NewPool[T any](opts ...PoolOptions[T]) (*Pool[T], error) {
 		initWorkerCount:   defaultInitWorkerCount,
 		maxWorkers:        defaultMaxWorkers,
 		minWorkers:        minWorkers,
-		newJob:            make(chan Job[T]),
-		exec:              make(chan Job[T]),
+		queue:             make(chan Job[T]),
+		jobs:              make(chan Job[T]),
 		resize:            make(chan int),
 		reqGetJobCount:    make(chan reqGetJobCount),
 		reqGetWorkerCount: make(chan reqGetWorkerCount),
 		done:              make(chan struct{}),
-		startOnce:         sync.Once{},
-		closeOnce:         sync.Once{},
+		startOnce:         &sync.Once{},
+		closeOnce:         &sync.Once{},
 		wg:                &sync.WaitGroup{},
 	}
 
@@ -74,7 +65,7 @@ func NewPool[T any](opts ...PoolOptions[T]) (*Pool[T], error) {
 	switch {
 	case pool.minWorkers < minWorkers:
 		return nil, fmt.Errorf("%w: min workers can't be less than %d", ErrInvalidArgument, minWorkers)
-	case pool.initWorkerCount < minWorkers:
+	case pool.initWorkerCount < pool.minWorkers:
 		return nil, fmt.Errorf("%w: init workers count can't be less than %d", ErrInvalidArgument, minWorkers)
 	}
 
@@ -86,10 +77,16 @@ func (p *Pool[T]) Max() int {
 	return p.maxWorkers
 }
 
-// Send sends new job to worker pool.
+// UnblockingSend sends new job to worker pool.
 // Not-blocking send.
+func (p *Pool[T]) UnblockingSend(j Job[T]) {
+	p.queue <- j
+}
+
+// Send sends new job to worker pool.
+// Blocking send.
 func (p *Pool[T]) Send(j Job[T]) {
-	p.newJob <- j
+	p.jobs <- j
 }
 
 // Resize send event for resizing worker pool.
@@ -106,6 +103,8 @@ func (p *Pool[T]) WorkerSize(ctx context.Context) (int, error) {
 
 	select {
 	case p.reqGetWorkerCount <- req:
+	case <-p.done:
+		return 0, ErrClosed
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
@@ -113,6 +112,8 @@ func (p *Pool[T]) WorkerSize(ctx context.Context) (int, error) {
 	select {
 	case res := <-resp:
 		return res, nil
+	case <-p.done:
+		return 0, ErrClosed
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
@@ -127,6 +128,8 @@ func (p *Pool[T]) JobBufferSize(ctx context.Context) (int, error) {
 
 	select {
 	case p.reqGetJobCount <- req:
+	case <-p.done:
+		return 0, ErrClosed
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
@@ -134,6 +137,8 @@ func (p *Pool[T]) JobBufferSize(ctx context.Context) (int, error) {
 	select {
 	case res := <-resp:
 		return res, nil
+	case <-p.done:
+		return 0, ErrClosed
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
@@ -144,9 +149,9 @@ func (p *Pool[T]) Start(ctx context.Context) {
 	p.startOnce.Do(func() {
 		wg := sync.WaitGroup{}
 		wg.Add(1)
-		go p.process(ctx, &wg)
+		go p.buffer(ctx, &wg)
 		wg.Add(1)
-		go p.dispatch(ctx, &wg)
+		go p.process(ctx, &wg)
 	})
 }
 
@@ -159,9 +164,9 @@ func (p *Pool[T]) Close() {
 }
 
 // controlling for not-blocking job collecting.
-func (p *Pool[T]) process(ctx context.Context, wg *sync.WaitGroup) {
+func (p *Pool[T]) buffer(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
-	q := chanq.NewQueue(p.exec)
+	q := chanq.NewQueue(p.jobs)
 
 	for {
 		select {
@@ -169,7 +174,7 @@ func (p *Pool[T]) process(ctx context.Context, wg *sync.WaitGroup) {
 			return
 		case <-p.done:
 			return
-		case j := <-p.newJob:
+		case j := <-p.queue:
 			q.Enqueue(j)
 		case q.C <- q.Elem:
 			q.Dequeue()
@@ -180,7 +185,7 @@ func (p *Pool[T]) process(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 // controlling for job executing.
-func (p *Pool[T]) dispatch(ctx context.Context, wg *sync.WaitGroup) {
+func (p *Pool[T]) process(ctx context.Context, wg *sync.WaitGroup) {
 	jobs := make(chan Job[T])
 	workers := make([]*Worker[T], p.initWorkerCount)
 	for i := range workers {
@@ -201,7 +206,7 @@ func (p *Pool[T]) dispatch(ctx context.Context, wg *sync.WaitGroup) {
 		case <-p.done:
 			return
 
-		case job := <-p.exec:
+		case job := <-p.jobs:
 			select {
 			case <-ctx.Done():
 				return
@@ -231,20 +236,17 @@ func (p *Pool[T]) dispatch(ctx context.Context, wg *sync.WaitGroup) {
 				workers = append(workers, newWorkers...)
 
 			case resize < 0:
+				size := len(workers)
 
-				resize = resize * -1 // TODO: Fixme
-				for i := 0; i < resize; i++ {
-					if len(workers) == 1 {
-						break
-					} else if len(workers) <= i {
-						break
-					}
-
-					workers[i].Close()
-					workers[i] = workers[len(workers)-1]
-					workers[len(workers)-1] = nil
-					workers = workers[:len(workers)-1]
+				truncate := size + resize
+				if truncate < p.minWorkers {
+					truncate = size - p.minWorkers
 				}
+				switchOff := workers[:truncate]
+				for i := range switchOff {
+					switchOff[i].Close()
+				}
+				workers = workers[truncate:]
 
 			default:
 				continue // If user send 0, we just ignore it.

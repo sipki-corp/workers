@@ -10,8 +10,8 @@ import (
 //	* This worker is blocking.
 type Worker[T any] struct {
 	wg        *sync.WaitGroup
-	startOnce sync.Once
-	closeOnce sync.Once
+	startOnce *sync.Once
+	closeOnce *sync.Once
 	done      chan struct{}
 	jobs      <-chan Job[T]
 }
@@ -22,8 +22,8 @@ type Worker[T any] struct {
 func NewWorker[T any](jobs <-chan Job[T], opts ...WorkerOptions[T]) *Worker[T] {
 	w := &Worker[T]{
 		wg:        &sync.WaitGroup{},
-		startOnce: sync.Once{},
-		closeOnce: sync.Once{},
+		startOnce: &sync.Once{},
+		closeOnce: &sync.Once{},
 		done:      make(chan struct{}),
 		jobs:      jobs,
 	}
@@ -35,6 +35,15 @@ func NewWorker[T any](jobs <-chan Job[T], opts ...WorkerOptions[T]) *Worker[T] {
 	return w
 }
 
+// Start starts worker process.
+// It's idempotent method.
+func (w *Worker[T]) Start(ctx context.Context) {
+	w.startOnce.Do(func() {
+		w.wg.Add(1)
+		go w.process(ctx)
+	})
+}
+
 // Close closes this worker.
 // It waits until worker process is down.
 // It's idempotent method.
@@ -43,15 +52,6 @@ func (w *Worker[T]) Close() {
 		close(w.done)
 	})
 	w.wg.Wait()
-}
-
-// Start starts worker process.
-// It's idempotent method.
-func (w *Worker[T]) Start(ctx context.Context) {
-	w.startOnce.Do(func() {
-		w.wg.Add(1)
-		go w.process(ctx)
-	})
 }
 
 func (w *Worker[T]) process(ctx context.Context) {

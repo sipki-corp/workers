@@ -75,6 +75,26 @@ func main() {
 	}
 	log.Printf("current pool worker size: %d", currentSize)
 
+	pool.Resize(-5)
+	currentSize, err = pool.WorkerSize(ctx)
+	if err != nil {
+		panic(err)
+	}
+
+	pool.Resize(-50)
+	currentSize, err = pool.WorkerSize(ctx)
+	if err != nil {
+		panic(err)
+	}
+	log.Printf("current pool worker size: %d", currentSize)
+
+	pool.Resize(10)
+	currentSize, err = pool.WorkerSize(ctx)
+	if err != nil {
+		panic(err)
+	}
+	log.Printf("current pool worker size: %d", currentSize)
+
 	resp := make(chan workers.Result[*http.Response])
 	wg := sync.WaitGroup{}
 	wg.Add(1)
