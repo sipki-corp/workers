@@ -81,8 +81,8 @@ func (w *Worker[T]) handle(ctx context.Context, job Job[T]) {
 	}
 
 	select {
-	case <-ctx.Done():
-	case <-w.done:
 	case job.Result() <- res:
+	case <-w.done:
+	case <-ctx.Done():
 	}
 }

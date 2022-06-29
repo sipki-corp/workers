@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-
-	"github.com/powerman/chanq"
 )
 
 type (
@@ -77,9 +75,9 @@ func (p *Pool[T]) Max() int {
 	return p.maxWorkers
 }
 
-// UnblockingSend sends new job to worker pool.
+// Publish sends new job to worker pool buffer.
 // Not-blocking send.
-func (p *Pool[T]) UnblockingSend(j Job[T]) {
+func (p *Pool[T]) Publish(j Job[T]) {
 	p.queue <- j
 }
 
@@ -166,7 +164,10 @@ func (p *Pool[T]) Close() {
 // controlling for not-blocking job collecting.
 func (p *Pool[T]) buffer(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
-	q := chanq.NewQueue(p.jobs)
+
+	var out chan Job[T]
+	var buffer []Job[T] // TODO: Optimization.
+	var elem Job[T]
 
 	for {
 		select {
@@ -174,12 +175,21 @@ func (p *Pool[T]) buffer(ctx context.Context, wg *sync.WaitGroup) {
 			return
 		case <-p.done:
 			return
-		case j := <-p.queue:
-			q.Enqueue(j)
-		case q.C <- q.Elem:
-			q.Dequeue()
+		case job := <-p.queue:
+			if len(buffer) == 0 {
+				out = make(chan Job[T])
+				elem = job
+			}
+			buffer = append(buffer, job)
+		case out <- elem:
+			buffer = buffer[1:]
+			if len(buffer) == 0 {
+				out = nil
+			} else {
+				elem = buffer[0]
+			}
 		case req := <-p.reqGetJobCount:
-			req.resp <- len(q.Queue)
+			req.resp <- len(buffer)
 		}
 	}
 }
