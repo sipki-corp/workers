@@ -74,11 +74,7 @@ func (w *Worker[T]) process(ctx context.Context) {
 }
 
 func (w *Worker[T]) handle(ctx context.Context, job Job[T]) {
-	val, err := job.Do(ctx)
-	res := Result[T]{
-		Value: val,
-		Err:   err,
-	}
+	res := job.Do(ctx)
 
 	select {
 	case job.Result() <- res:

@@ -12,28 +12,33 @@ import (
 	"github.com/sipki-corp/workers"
 )
 
-var _ workers.Job[*http.Response] = &job{}
+type result struct {
+	resp *http.Response
+	err  error
+}
+
+var _ workers.Job[*result] = &job{}
 
 type job struct {
 	method string
 	addr   string
 	body   io.Reader
-	res    chan workers.Result[*http.Response]
+	res    chan *result
 	client *http.Client
 }
 
-func (j *job) Do(ctx context.Context) (*http.Response, error) {
+func (j *job) Do(ctx context.Context) *result {
 	req, err := http.NewRequestWithContext(ctx, j.method, j.addr, j.body)
 	if err != nil {
-		return nil, err
+		return &result{err: err}
 	}
 
-	time.Sleep(time.Second)
+	resp, err := j.client.Do(req)
 
-	return j.client.Do(req)
+	return &result{resp: resp, err: err}
 }
 
-func (j *job) Result() chan<- workers.Result[*http.Response] {
+func (j *job) Result() chan<- *result {
 	return j.res
 }
 
@@ -47,7 +52,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
-	pool, err := workers.NewPool[*http.Response]()
+	pool, err := workers.NewPool[*result]()
 	if err != nil {
 		panic(err)
 	}
@@ -95,7 +100,7 @@ func main() {
 	}
 	log.Printf("current pool worker size: %d", currentSize)
 
-	resp := make(chan workers.Result[*http.Response])
+	resp := make(chan *result)
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	defer wg.Wait()
@@ -103,14 +108,15 @@ func main() {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < *count; i++ {
-			pool.Send(&job{
+			j := &job{
 				method: http.MethodGet,
 				addr:   "https://google.com",
 				body:   http.NoBody,
 				res:    resp,
 				client: &http.Client{},
-			},
-			)
+			}
+
+			pool.Send(j)
 
 			log.Printf("send element %d", i)
 		}
@@ -131,11 +137,11 @@ func main() {
 
 		select {
 		case result := <-resp:
-			if result.Err != nil {
-				panic(result.Err)
+			if result.err != nil {
+				panic(result.err)
 			}
 
-			closeErr := result.Value.Body.Close()
+			closeErr := result.resp.Body.Close()
 			if closeErr != nil {
 				panic(closeErr)
 			}
