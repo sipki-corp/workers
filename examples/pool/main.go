@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/sipki-corp/workers"
@@ -85,6 +84,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	log.Printf("current pool worker size: %d", currentSize)
 
 	pool.Resize(-50)
 	currentSize, err = pool.WorkerSize(ctx)
@@ -101,26 +101,26 @@ func main() {
 	log.Printf("current pool worker size: %d", currentSize)
 
 	resp := make(chan *result)
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-	defer wg.Wait()
 
-	go func() {
-		defer wg.Done()
-		for i := 0; i < *count; i++ {
-			j := &job{
-				method: http.MethodGet,
-				addr:   "https://google.com",
-				body:   http.NoBody,
-				res:    resp,
-				client: &http.Client{},
-			}
-
-			pool.Send(j)
-
-			log.Printf("send element %d", i)
+	for i := 0; i < *count; i++ {
+		j := &job{
+			method: http.MethodGet,
+			addr:   "https://google.com",
+			body:   http.NoBody,
+			res:    resp,
+			client: &http.Client{},
 		}
-	}()
+
+		pool.Publish(j)
+
+		log.Printf("send element %d", i)
+
+		jobSize, err := pool.JobBufferSize(ctx)
+		if err != nil {
+			panic(err)
+		}
+		log.Printf("current job queue size: %d", jobSize)
+	}
 
 	time.Sleep(time.Second * 2)
 	jobSize, err = pool.JobBufferSize(ctx)

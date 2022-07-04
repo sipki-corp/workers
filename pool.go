@@ -147,9 +147,10 @@ func (p *Pool[T]) Start(ctx context.Context) {
 	p.startOnce.Do(func() {
 		wg := sync.WaitGroup{}
 		wg.Add(1)
-		go p.buffer(ctx, &wg)
+		buffer := make(chan Job[T])
+		go p.buffer(ctx, buffer, &wg)
 		wg.Add(1)
-		go p.process(ctx, &wg)
+		go p.process(ctx, buffer, &wg)
 	})
 }
 
@@ -162,12 +163,11 @@ func (p *Pool[T]) Close() {
 }
 
 // controlling for not-blocking job collecting.
-func (p *Pool[T]) buffer(ctx context.Context, wg *sync.WaitGroup) {
+func (p *Pool[T]) buffer(ctx context.Context, buffer chan<- Job[T], wg *sync.WaitGroup) {
 	defer wg.Done()
-
-	var out chan Job[T]
-	var buffer []Job[T] // TODO: Optimization.
+	var elements []Job[T] // TODO: Optimization.
 	var elem Job[T]
+	var out chan<- Job[T]
 
 	for {
 		select {
@@ -176,35 +176,35 @@ func (p *Pool[T]) buffer(ctx context.Context, wg *sync.WaitGroup) {
 		case <-p.done:
 			return
 		case job := <-p.queue:
-			if len(buffer) == 0 {
-				out = make(chan Job[T])
+			if len(elements) == 0 {
+				out = buffer
 				elem = job
 			}
-			buffer = append(buffer, job)
+			elements = append(elements, job)
 		case out <- elem:
-			buffer = buffer[1:]
-			if len(buffer) == 0 {
+			elements = elements[1:]
+			if len(elements) == 0 {
 				out = nil
 			} else {
-				elem = buffer[0]
+				elem = elements[0]
 			}
 		case req := <-p.reqGetJobCount:
-			req.resp <- len(buffer)
+			req.resp <- len(elements)
 		}
 	}
 }
 
 // controlling for job executing.
-func (p *Pool[T]) process(ctx context.Context, wg *sync.WaitGroup) {
-	jobs := make(chan Job[T])
+func (p *Pool[T]) process(ctx context.Context, buffer <-chan Job[T], wg *sync.WaitGroup) {
+	workerQueue := make(chan Job[T])
 	workers := make([]*Worker[T], p.initWorkerCount)
 	for i := range workers {
-		workers[i] = NewWorker(jobs)
+		workers[i] = NewWorker(workerQueue)
 		workers[i].Start(ctx)
 	}
 
 	defer func() {
-		close(jobs)
+		close(workerQueue)
 		wg.Done()
 	}()
 
@@ -216,13 +216,22 @@ func (p *Pool[T]) process(ctx context.Context, wg *sync.WaitGroup) {
 		case <-p.done:
 			return
 
+		case job := <-buffer:
+			select {
+			case <-ctx.Done():
+				return
+			case <-p.done:
+				return
+			case workerQueue <- job:
+			}
+
 		case job := <-p.jobs:
 			select {
 			case <-ctx.Done():
 				return
 			case <-p.done:
 				return
-			case jobs <- job:
+			case workerQueue <- job:
 			}
 
 		case req := <-p.reqGetWorkerCount:
@@ -239,7 +248,7 @@ func (p *Pool[T]) process(ctx context.Context, wg *sync.WaitGroup) {
 
 				newWorkers := make([]*Worker[T], resize)
 				for i := range newWorkers {
-					newWorkers[i] = NewWorker(jobs)
+					newWorkers[i] = NewWorker(workerQueue)
 					newWorkers[i].Start(ctx)
 				}
 
