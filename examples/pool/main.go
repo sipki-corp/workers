@@ -102,7 +102,7 @@ func main() {
 
 	resp := make(chan *result)
 
-	for i := 0; i < *count; i++ {
+	for i := 1; i <= *count; i++ {
 		j := &job{
 			method: http.MethodGet,
 			addr:   "https://google.com",
@@ -121,13 +121,6 @@ func main() {
 		}
 		log.Printf("current job queue size: %d", jobSize)
 	}
-
-	time.Sleep(time.Second * 2)
-	jobSize, err = pool.JobBufferSize(ctx)
-	if err != nil {
-		panic(err)
-	}
-	log.Printf("current job queue size: %d", jobSize)
 
 	results := 0
 	for {
